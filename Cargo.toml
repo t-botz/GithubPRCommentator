@@ -1,6 +1,7 @@
 [package]
 name = "pr-commentator"
 version = "0.1.0"
+description = "A tool to comment on github PR"
 authors = ["tibo <delor.thibault@gmail.com>"]
 edition = "2018"
 
