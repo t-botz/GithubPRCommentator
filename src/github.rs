@@ -1,6 +1,8 @@
 use github_types::ShortCommit;
+use log::{debug, warn};
 use reqwest::{Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use url::Url;
 
 #[derive(Serialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -20,14 +22,42 @@ pub struct GithubAPI {
     pub token: String,
 }
 
+fn mask_token(token: &mut String) -> &mut String {
+    if token.len() > 8 {
+        token.replace_range(
+            std::ops::Range {
+                start: 2,
+                end: token.len() - 2,
+            },
+            "************",
+        );
+    } else {
+        token.replace_range(std::ops::RangeFull, "************");
+    };
+    token
+}
+
+impl fmt::Debug for GithubAPI {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GithubAPI {{ base_url: '{}',  token: '{}' }}",
+            self.base_url,
+            mask_token(&mut self.token.clone())
+        )
+    }
+}
+
 fn req_error_to_string(req_error: reqwest::Error) -> String {
     format!("{:?}", req_error)
 }
 
 impl GithubAPI {
     pub fn request(&self, method: Method, url: &str) -> RequestBuilder {
+        let full_url = self.base_url.join(url).unwrap(); // TODO: Unwrap yuk
+        debug!("{} {}", method, full_url);
         reqwest::Client::new()
-            .request(method, self.base_url.join(url).unwrap()) // TODO: Unwrap yuk
+            .request(method, full_url)
             .header("Authorization", "token ".to_owned() + &self.token)
             .header("Accept", "application/vnd.github.v3+json")
     }
@@ -47,7 +77,10 @@ impl GithubAPI {
         )
         .send()
         .and_then(|mut r| r.json())
-        .map_err(req_error_to_string)
+        .map_err(|e| {
+            warn!("Failed to process Github response: {:?}", e);
+            req_error_to_string(e)
+        })
         .and_then(|prs: Vec<PullRequestSummary>| {
             if let Some(pr) = prs.iter().find(|pr| pr.head.commit_ref == branch_name) {
                 Ok(pr.number)

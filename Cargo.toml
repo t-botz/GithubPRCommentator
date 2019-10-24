@@ -6,6 +6,8 @@ authors = ["tibo <delor.thibault@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+log = "0.4"
+env_logger = "0.7"
 reqwest = "0.9"
 github-types = "0.1.1"
 url = "1.2"

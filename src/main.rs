@@ -5,9 +5,12 @@ use std::io::{self, Read};
 use std::str::FromStr;
 
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
+use env_logger;
 use github::GithubAPI;
+use log::{debug, info};
 use url::Url;
 
+#[derive(Debug)]
 enum CommentSource {
     StrArg { comment: String },
     Standard(io::Stdin),
@@ -19,10 +22,12 @@ impl CommentSource {
         match self {
             CommentSource::StrArg { comment } => Ok(comment),
             CommentSource::Standard(mut stdin) => {
+                debug!("Reading std for comment");
                 let mut buffer = String::new();
                 stdin.read_to_string(&mut buffer).map(|_| buffer)
             }
             CommentSource::File(mut file) => {
+                debug!("Reading file for comment");
                 let mut buffer = String::new();
                 file.read_to_string(&mut buffer).map(|_| buffer)
             }
@@ -30,6 +35,7 @@ impl CommentSource {
     }
 }
 
+#[derive(Debug)]
 pub struct Config {
     api: GithubAPI,
     repo_owner: String,
@@ -113,6 +119,7 @@ fn parse_cli() -> Config {
             comment: comment.to_owned(),
         }
     } else if let Some(comment_file) = app.value_of(&comment_file_arg.b.name) {
+        debug!("Opening file {}", comment_file);
         CommentSource::File(
             fs::OpenOptions::new()
                 .read(true)
@@ -148,18 +155,28 @@ fn parse_cli() -> Config {
 }
 
 fn main() -> Result<(), String> {
-    let config = parse_cli();
+    env_logger::init();
 
+    debug!("Parsing Command line");
+    let config = parse_cli();
+    debug!("Config parsed as: {:?}", &config);
+
+    debug!("Evaluating comment content");
     let comment = config
         .comment_source
         .retrieve()
         .map_err(|err| format!("Failed to read comment : {}", err))?;
+
+    debug!("Determining PR number");
     let pr_number = config.api.find_pr_for_branch(
         &config.repo_owner,
         &config.repo_name,
         &config.branch_name,
     )?;
+
+    debug!("Commenting back to PR#{}", pr_number);
     config
         .api
         .comment(&config.repo_owner, &config.repo_name, pr_number, &comment)
+        .map(|_| info!("Successfully commented back to PR#{}", pr_number))
 }
