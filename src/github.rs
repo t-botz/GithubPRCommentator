@@ -1,6 +1,7 @@
+use anyhow::{anyhow, Context, Result};
 use github_types::ShortCommit;
 use lazy_static::lazy_static;
-use log::{debug, warn};
+use log::debug;
 use regex::Regex;
 use reqwest::{Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
@@ -58,10 +59,6 @@ impl fmt::Debug for GithubAPI {
     }
 }
 
-fn req_error_to_string(req_error: reqwest::Error) -> String {
-    format!("{:?}", req_error)
-}
-
 impl GithubAPI {
     pub fn request(&self, method: Method, url: &str) -> RequestBuilder {
         let full_url = self.base_url.join(url).unwrap(); // TODO: Unwrap yuk
@@ -72,15 +69,10 @@ impl GithubAPI {
             .header("Accept", "application/vnd.github.v3+json")
     }
 
-    pub fn find_pr_for_ref(
-        &self,
-        repo_owner: &str,
-        repo_name: &str,
-        git_ref: &str,
-    ) -> Result<u64, String> {
+    pub fn find_pr_for_ref(&self, repo_owner: &str, repo_name: &str, git_ref: &str) -> Result<u64> {
         if let Some(capture) = PR_BRANCH_GITHUB_PATTERN.captures(git_ref) {
             debug!("Extracting PR number from branch name [{}]", git_ref);
-            return u64::from_str(&capture[1]).map_err(|_| {
+            return u64::from_str(&capture[1]).with_context(|| {
                 // In practice should never happen
                 format!(
                     "Reference {} identified as PR but failing to parse",
@@ -97,16 +89,16 @@ impl GithubAPI {
             ),
         )
         .send()
-        .and_then(|mut r| r.json())
-        .map_err(|e| {
-            warn!("Failed to process Github response: {:?}", e);
-            req_error_to_string(e)
+        .context("Failed to send Github Request")
+        .and_then(|mut r| {
+            r.json()
+                .with_context(|| format!("Failed to parse Response: {:?}", r))
         })
         .and_then(|prs: Vec<PullRequestSummary>| {
             if let Some(pr) = prs.iter().find(|pr| pr.head.commit_ref == git_ref) {
                 Ok(pr.number)
             } else {
-                Err("Cant find dude".to_owned())
+                Err(anyhow!("No PRs are matching the branch name"))
             }
         })
     }
@@ -117,7 +109,7 @@ impl GithubAPI {
         repo_name: &str,
         issue_number: u64,
         comment: T,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let body = CommentCreateRequest {
             body: comment.into(),
         };
@@ -131,12 +123,15 @@ impl GithubAPI {
         )
         .json(&body)
         .send()
-        .map_err(req_error_to_string)
+        .context("Creating comment failed")
         .and_then(|res| {
             if res.status() == 201 {
                 Ok(())
             } else {
-                Err(format!("Arggggg {:?}", res))
+                Err(anyhow!(
+                    "Github returned unexpected status : {}",
+                    res.status()
+                ))
             }
         })
     }
@@ -149,14 +144,14 @@ pub struct RepoInfo {
     pub name: String,
 }
 
-pub fn get_repo_info_from_url(url: Url) -> Result<RepoInfo, String> {
+pub fn get_repo_info_from_url(url: Url) -> Result<RepoInfo> {
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(format!("Url {} has unexpected query args or fragment", url));
+        return Err(anyhow!("Url {} has unexpected query args or fragment", url));
     }
     if let Some(segments) = url.path_segments() {
         let seg_vec = Vec::from_iter(segments);
         if seg_vec.len() != 2 {
-            Err(format!(
+            Err(anyhow!(
                 "Url {} doesn't have the expected 2 path segments (org, repo name)",
                 url
             ))
@@ -165,7 +160,7 @@ pub fn get_repo_info_from_url(url: Url) -> Result<RepoInfo, String> {
                 DEFAULT_GITHUB_API_URL.clone()
             } else {
                 url.join("/api/v3/")
-                    .map_err(|e| format!("Couldnt determine api url for {}:\n{}", url, e))?
+                    .with_context(|| format!("Couldnt determine api url for {}", url))?
             };
             let repo_name = if seg_vec[1].ends_with(".git") {
                 seg_vec[1][..seg_vec[1].len() - 4].to_owned()
@@ -178,10 +173,10 @@ pub fn get_repo_info_from_url(url: Url) -> Result<RepoInfo, String> {
                 name: repo_name,
             })
         } else {
-            Err(format!("Url {} has no host???", url))
+            Err(anyhow!("Url {} has no host???", url))
         }
     } else {
-        Err(format!("Url {} is not a supported github repo url", url))
+        Err(anyhow!("Url {} is not a supported github repo url", url))
     }
 }
 
@@ -189,9 +184,9 @@ pub fn get_repo_info_from_url(url: Url) -> Result<RepoInfo, String> {
 mod tests {
     use super::*;
 
-    fn repo(url: &str) -> Result<RepoInfo, String> {
+    fn repo(url: &str) -> Result<RepoInfo> {
         Url::from_str(url)
-            .map_err(|_| "Can't parse URL".to_owned())
+            .context("Can't parse URL")
             .and_then(get_repo_info_from_url)
     }
 

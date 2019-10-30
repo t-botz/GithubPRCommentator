@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::str::FromStr;
 
+use anyhow::{Context, Result};
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
 use env_logger;
 use github::{get_repo_info_from_url, GithubAPI, DEFAULT_GITHUB_API_URL};
@@ -18,18 +19,23 @@ enum CommentSource {
 }
 
 impl CommentSource {
-    pub fn retrieve(self) -> io::Result<String> {
+    pub fn retrieve(self) -> Result<String> {
         match self {
             CommentSource::StrArg { comment } => Ok(comment),
             CommentSource::Standard(mut stdin) => {
-                debug!("Reading std for comment");
+                debug!("Reading stdin for comment");
                 let mut buffer = String::new();
-                stdin.read_to_string(&mut buffer).map(|_| buffer)
+                stdin
+                    .read_to_string(&mut buffer)
+                    .map(|_| buffer)
+                    .context("Failed to read comment from stdin")
             }
             CommentSource::File(mut file) => {
                 debug!("Reading file for comment");
                 let mut buffer = String::new();
-                file.read_to_string(&mut buffer).map(|_| buffer)
+                file.read_to_string(&mut buffer)
+                    .map(|_| buffer)
+                    .context("Failed to read comment from file")
             }
         }
     }
@@ -44,7 +50,7 @@ pub struct Config {
     comment_source: CommentSource,
 }
 
-fn parse_cli() -> Config {
+fn parse_cli() -> Result<Config> {
     fn get_arg(app: &ArgMatches, arg: &Arg) -> String {
         app.value_of(arg.b.name).unwrap().to_owned()
     }
@@ -122,7 +128,7 @@ fn parse_cli() -> Config {
 
     let repo_info = app.value_of(&repo_url_arg.b.name).map(|repo_url| {
         Url::from_str(repo_url)
-            .map_err(|e| format!("Invalid url {} : {}", repo_url, e))
+            .with_context(|| format!("Invalid url `{}", repo_url))
             .and_then(get_repo_info_from_url)
             .unwrap_or_else(|err| {
                 clap::Error {
@@ -212,7 +218,7 @@ fn parse_cli() -> Config {
         CommentSource::Standard(io::stdin())
     };
 
-    Config {
+    Ok(Config {
         api: GithubAPI {
             base_url: api_url,
             token: get_arg(&app, &token_arg),
@@ -221,21 +227,21 @@ fn parse_cli() -> Config {
         repo_name: repo,
         branch_name: get_arg(&app, &branch_arg),
         comment_source,
-    }
+    })
 }
 
-fn main() -> Result<(), String> {
+fn main() -> Result<()> {
     env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     debug!("Parsing Command line");
-    let config = parse_cli();
+    let config = parse_cli()?;
     debug!("Config parsed as: {:?}", &config);
 
     debug!("Evaluating comment content");
     let comment = config
         .comment_source
         .retrieve()
-        .map_err(|err| format!("Failed to read comment : {}", err))?;
+        .context("Failed to read comment")?;
 
     debug!("Determining PR number");
     let pr_number =
@@ -247,5 +253,6 @@ fn main() -> Result<(), String> {
     config
         .api
         .comment(&config.repo_owner, &config.repo_name, pr_number, &comment)
+        .context("Failed to publish comment")
         .map(|_| info!("Successfully commented back to PR#{}", pr_number))
 }
