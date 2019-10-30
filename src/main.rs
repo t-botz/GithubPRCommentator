@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
 use env_logger;
-use github::GithubAPI;
+use github::{get_repo_info_from_url, GithubAPI, DEFAULT_GITHUB_API_URL};
 use log::{debug, info};
 use url::Url;
 
@@ -49,10 +49,16 @@ fn parse_cli() -> Config {
         app.value_of(arg.b.name).unwrap().to_owned()
     }
 
+    let repo_url_arg = Arg::with_name("Repo Url")
+        .long("repo-url")
+        .help(
+            "The repository url, used to deduce the repo name, api url and \
+             organization. This is evaluated first if present and can be overridden",
+        )
+        .takes_value(true);
     let api_url_arg = Arg::with_name("Api Url")
         .long("api-url")
         .help("The Github api base url")
-        .default_value("https://api.github.com/")
         .takes_value(true);
     let token_arg = Arg::with_name("token")
         .long("token")
@@ -61,19 +67,18 @@ fn parse_cli() -> Config {
         .takes_value(true);
     let org_arg = Arg::with_name("GitHub organization")
         .long("org")
-        .required(true)
-        .help("The Github organisation or username containing the repo")
+        .required_unless(repo_url_arg.b.name)
+        .help("The Github organization or username containing the repo")
         .takes_value(true);
     let repo_arg = Arg::with_name("Repo name")
         .long("repo")
-        .required(true)
+        .required_unless(repo_url_arg.b.name)
         .help("The repository name")
         .takes_value(true);
-    let branch_arg = Arg::with_name("Branch")
-        .long("branch")
-        .short("b")
+    let branch_arg = Arg::with_name("Git reference")
+        .long("ref")
         .required(true)
-        .help("The branch name to retrieve the PR number")
+        .help("The reference name to retrieve the PR number (e.g. 'refs/head/my_branch')")
         .takes_value(true);
     let comment_file_arg = Arg::with_name("Comment Input File")
         .long("comment-file")
@@ -104,6 +109,7 @@ fn parse_cli() -> Config {
             )
             .as_ref(),
         )
+        .arg(&repo_url_arg)
         .arg(&api_url_arg)
         .arg(&token_arg)
         .arg(&org_arg)
@@ -113,6 +119,70 @@ fn parse_cli() -> Config {
         .arg(&comment_file_arg)
         .arg(&std_in_arg)
         .get_matches();
+
+    let repo_info = app.value_of(&repo_url_arg.b.name).map(|repo_url| {
+        Url::from_str(repo_url)
+            .map_err(|e| format!("Invalid url {} : {}", repo_url, e))
+            .and_then(get_repo_info_from_url)
+            .unwrap_or_else(|err| {
+                clap::Error {
+                    message: format!("Invalid repo url {} : {}", repo_url, err),
+                    kind: clap::ErrorKind::ValueValidation,
+                    info: None,
+                }
+                .exit()
+            })
+    });
+
+    let (repo_info_api_url, repo_info_name, repo_info_org) = if let Some(repo_info) = repo_info {
+        (
+            Some(repo_info.api_url),
+            Some(repo_info.name),
+            Some(repo_info.org),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let api_url = app
+        .value_of(api_url_arg.b.name)
+        .map(|url| {
+            Url::from_str(url).unwrap_or_else(|err| {
+                clap::Error {
+                    message: format!("Invalid repo url {} : {}", url, err),
+                    kind: clap::ErrorKind::ValueValidation,
+                    info: None,
+                }
+                .exit()
+            })
+        })
+        .or(repo_info_api_url)
+        .unwrap_or_else(|| DEFAULT_GITHUB_API_URL.clone());
+
+    let repo = app
+        .value_of(&repo_arg.b.name)
+        .map(ToOwned::to_owned)
+        .or(repo_info_name)
+        .unwrap_or_else(|| {
+            clap::Error {
+                message: "Missing repo name!".to_owned(),
+                kind: clap::ErrorKind::ArgumentNotFound,
+                info: None,
+            }
+            .exit()
+        });
+    let org = app
+        .value_of(&org_arg.b.name)
+        .map(ToOwned::to_owned)
+        .or(repo_info_org)
+        .unwrap_or_else(|| {
+            clap::Error {
+                message: "Missing repo name!".to_owned(),
+                kind: clap::ErrorKind::ArgumentNotFound,
+                info: None,
+            }
+            .exit()
+        });
 
     let comment_source: CommentSource = if let Some(comment) = app.value_of(&comment_arg.b.name) {
         CommentSource::StrArg {
@@ -144,18 +214,18 @@ fn parse_cli() -> Config {
 
     Config {
         api: GithubAPI {
-            base_url: Url::from_str(&get_arg(&app, &api_url_arg)).unwrap(),
+            base_url: api_url,
             token: get_arg(&app, &token_arg),
         },
-        repo_owner: get_arg(&app, &org_arg),
-        repo_name: get_arg(&app, &repo_arg),
+        repo_owner: org,
+        repo_name: repo,
         branch_name: get_arg(&app, &branch_arg),
-        comment_source: comment_source,
+        comment_source,
     }
 }
 
 fn main() -> Result<(), String> {
-    env_logger::init();
+    env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     debug!("Parsing Command line");
     let config = parse_cli();
@@ -168,11 +238,10 @@ fn main() -> Result<(), String> {
         .map_err(|err| format!("Failed to read comment : {}", err))?;
 
     debug!("Determining PR number");
-    let pr_number = config.api.find_pr_for_branch(
-        &config.repo_owner,
-        &config.repo_name,
-        &config.branch_name,
-    )?;
+    let pr_number =
+        config
+            .api
+            .find_pr_for_ref(&config.repo_owner, &config.repo_name, &config.branch_name)?;
 
     debug!("Commenting back to PR#{}", pr_number);
     config
