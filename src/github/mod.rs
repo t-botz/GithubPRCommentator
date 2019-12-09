@@ -1,3 +1,5 @@
+pub mod metadata;
+
 use anyhow::{anyhow, Context, Result};
 use github_types::ShortCommit;
 use lazy_static::lazy_static;
