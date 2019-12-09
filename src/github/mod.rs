@@ -21,6 +21,14 @@ pub struct CommentCreateRequest {
     pub body: String,
 }
 
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct IssueComment {
+    pub id: u64,
+    pub body: String
+}
+
+
+
 // The api to retrieve the list of PR doesn't return all the fields of the PR
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PullRequestSummary {
@@ -109,7 +117,7 @@ impl GithubAPI {
         repo_name: &str,
         issue_number: u64,
         comment: T,
-    ) -> Result<()> {
+    ) -> Result<IssueComment> {
         let body = CommentCreateRequest {
             body: comment.into(),
         };
@@ -124,9 +132,70 @@ impl GithubAPI {
         .json(&body)
         .send()
         .context("Creating comment failed")
-        .and_then(|res| {
+        .and_then(|mut res| {
             if res.status() == 201 {
-                Ok(())
+                res.json().context("Failed to deserialize comment")
+            } else {
+                Err(anyhow!(
+                    "Github returned unexpected status : {}",
+                    res.status()
+                ))
+            }
+        })
+    }
+
+    pub fn edit_comment<T: Into<String>>(
+        &self,
+        repo_owner: &str,
+        repo_name: &str,
+        comment_id: u64,
+        comment: T,
+    ) -> Result<IssueComment> {
+        let body = CommentCreateRequest {
+            body: comment.into(),
+        };
+
+        self.request(
+            Method::PATCH,
+            &format!(
+                "repos/{}/{}/issues/comments/{}",
+                repo_owner, repo_name, comment_id
+            ),
+        )
+        .json(&body)
+        .send()
+        .context("Editing comment failed")
+        .and_then(|mut res| {
+            if res.status() == 200 {
+                res.json().context("Failed to deserialize comment")
+            } else {
+                Err(anyhow!(
+                    "Github returned unexpected status : {}",
+                    res.status()
+                ))
+            }
+        })
+    }
+
+
+    pub fn list_comments(
+        &self,
+        repo_owner: &str,
+        repo_name: &str,
+        issue_number: u64
+    ) -> Result<Vec<IssueComment>> {
+        self.request(
+            Method::GET,
+            &format!(
+                "repos/{}/{}/issues/{}/comments",
+                repo_owner, repo_name, issue_number
+            ),
+        )
+        .send()
+        .context("Listing comments failed")
+        .and_then(|mut res| {
+            if res.status() == 200 {
+                res.json().context("Failed to deserialize comments")
             } else {
                 Err(anyhow!(
                     "Github returned unexpected status : {}",
