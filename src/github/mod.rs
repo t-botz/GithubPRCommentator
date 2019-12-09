@@ -26,10 +26,8 @@ pub struct CommentCreateRequest {
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct IssueComment {
     pub id: u64,
-    pub body: String
+    pub body: String,
 }
-
-
 
 // The api to retrieve the list of PR doesn't return all the fields of the PR
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -179,12 +177,11 @@ impl GithubAPI {
         })
     }
 
-
     pub fn list_comments(
         &self,
         repo_owner: &str,
         repo_name: &str,
-        issue_number: u64
+        issue_number: u64,
     ) -> Result<Vec<IssueComment>> {
         self.request(
             Method::GET,

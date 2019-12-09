@@ -7,9 +7,10 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
 use env_logger;
+use github::metadata::HtmlCommentMetadataHandler;
 use github::{get_repo_info_from_url, GithubAPI, DEFAULT_GITHUB_API_URL};
-use log::{debug, info};
-use strum_macros::{EnumString, EnumVariantNames};
+use log::{debug, info, warn};
+use strum_macros::{Display, EnumString, EnumVariantNames};
 use url::Url;
 
 #[derive(Debug)]
@@ -20,10 +21,10 @@ enum CommentSource {
 }
 
 impl CommentSource {
-    pub fn retrieve(self) -> Result<String> {
+    pub fn retrieve(&mut self) -> Result<String> {
         match self {
-            CommentSource::StrArg { comment } => Ok(comment),
-            CommentSource::Standard(mut stdin) => {
+            CommentSource::StrArg { comment } => Ok(comment.clone()),
+            CommentSource::Standard(stdin) => {
                 debug!("Reading stdin for comment");
                 let mut buffer = String::new();
                 stdin
@@ -31,7 +32,7 @@ impl CommentSource {
                     .map(|_| buffer)
                     .context("Failed to read comment from stdin")
             }
-            CommentSource::File(mut file) => {
+            CommentSource::File(file) => {
                 debug!("Reading file for comment");
                 let mut buffer = String::new();
                 file.read_to_string(&mut buffer)
@@ -43,14 +44,14 @@ impl CommentSource {
 }
 
 /// Define the behaviour when writing the comment on the PR
-#[derive(Debug, EnumString, EnumVariantNames)]
+#[derive(Debug, EnumString, EnumVariantNames, Display, PartialEq, Eq, Clone, Copy)]
 enum CommentOverwriteMode {
     /// Dont check for existing generated comment, just append
     Never,
     /// Always overwrite previous generated comment
     Always,
-    /// Overwrite only if previous comment was made on same commit
-    OnSameCommit,
+    /// Overwrite only if provided identifier matches
+    UsingIdentifier,
 }
 
 impl Default for CommentOverwriteMode {
@@ -67,6 +68,7 @@ pub struct Config {
     branch_name: String,
     comment_source: CommentSource,
     overwrite_mode: CommentOverwriteMode,
+    overwrite_identifier: Option<String>,
 }
 
 fn parse_cli() -> Result<Config> {
@@ -121,6 +123,12 @@ fn parse_cli() -> Result<Config> {
         .long("overwrite")
         .possible_values(&CommentOverwriteMode::variants())
         .help("Whether previous comment in the PR should be overwritten");
+    let overwrite_id_help = format!("An arbitrary string used to identify comment to overwrite (e.g commit hash, build number, ...).
+        This imply overwrite mode {}", CommentOverwriteMode::UsingIdentifier);
+    let overwrite_id_arg = Arg::with_name("Overwrite identifier")
+        .long("overwrite-id")
+        .help(&overwrite_id_help)
+        .takes_value(true);
     let app = App::new(crate_name!())
         .version(crate_version!())
         .about(crate_description!())
@@ -148,6 +156,7 @@ fn parse_cli() -> Result<Config> {
         .arg(&comment_file_arg)
         .arg(&std_in_arg)
         .arg(&overwrite_mode_arg)
+        .arg(&overwrite_id_arg)
         .get_matches();
 
     let repo_info = app.value_of(&repo_url_arg.b.name).map(|repo_url| {
@@ -242,19 +251,26 @@ fn parse_cli() -> Result<Config> {
         CommentSource::Standard(io::stdin())
     };
 
-    let overwrite_mode = app
-        .value_of(&overwrite_mode_arg.b.name)
-        .map(|m| {
-            CommentOverwriteMode::from_str(m).unwrap_or_else(|_| {
-                clap::Error {
-                    message: format!("Invalid overwrite Mode: {}", m,),
-                    kind: clap::ErrorKind::ArgumentNotFound,
-                    info: None,
-                }
-                .exit()
+    let overwrite_mode = if app.is_present(&overwrite_id_arg.b.name) {
+        CommentOverwriteMode::UsingIdentifier
+    } else {
+        app.value_of(&overwrite_mode_arg.b.name)
+            .map(|m| {
+                CommentOverwriteMode::from_str(m).unwrap_or_else(|_| {
+                    clap::Error {
+                        message: format!("Invalid overwrite Mode: {}", m,),
+                        kind: clap::ErrorKind::ArgumentNotFound,
+                        info: None,
+                    }
+                    .exit()
+                })
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default()
+    };
+
+    let overwrite_identifier = app
+        .value_of(&overwrite_id_arg.b.name)
+        .map(ToOwned::to_owned);
 
     Ok(Config {
         api: GithubAPI {
@@ -266,6 +282,7 @@ fn parse_cli() -> Result<Config> {
         branch_name: get_arg(&app, &branch_arg),
         comment_source,
         overwrite_mode,
+        overwrite_identifier,
     })
 }
 
@@ -273,7 +290,7 @@ fn main() -> Result<()> {
     env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     debug!("Parsing Command line");
-    let config = parse_cli()?;
+    let mut config = parse_cli()?;
     debug!("Config parsed as: {:?}", &config);
 
     debug!("Evaluating comment content");
@@ -287,11 +304,69 @@ fn main() -> Result<()> {
         config
             .api
             .find_pr_for_ref(&config.repo_owner, &config.repo_name, &config.branch_name)?;
+    let metadata_handler = HtmlCommentMetadataHandler {
+        metadata_id: "pr_commentator : ".to_string(),
+    };
+    let maybe_comment_to_override: Option<u64> = if config.overwrite_mode
+        == CommentOverwriteMode::Never
+    {
+        None
+    } else {
+        debug!("Searching comment to override on PR#{}", pr_number);
+        let overwrite_mode = config.overwrite_mode;
+        let overwrite_identifier = config.overwrite_identifier.clone();
+        let result = config
+            .api
+            .list_comments(&config.repo_owner, &config.repo_name, pr_number)
+            .map(|r| {
+                r.into_iter()
+                    .filter(|c| {
+                        match metadata_handler.get_metadata_from_comment::<Option<String>>(&c.body) {
+                            None => false,
+                            Some(Ok(identifier)) => {
+                                overwrite_mode == CommentOverwriteMode::Always
+                                    || overwrite_identifier == identifier
+                            }
+                            Some(Err(e)) => {
+                                warn!("Failed to parse metadata of a comment : {:?}\n{}", &c, e);
+                                false
+                            }
+                        }
+                    })
+                    .map(|c| c.id)
+                    .last()
+            });
+        match result {
+            Ok(c) => c,
+            Err(e) => return Err(e),
+        }
+    };
 
-    debug!("Commenting back to PR#{}", pr_number);
-    config
-        .api
-        .comment(&config.repo_owner, &config.repo_name, pr_number, &comment)
-        .context("Failed to publish comment")
-        .map(|_| info!("Successfully commented back to PR#{}", pr_number))
+    metadata_handler
+        .add_metadata_to_comment(&comment, &config.overwrite_identifier)
+        .context("Can't add Metadata to comment")
+        .and_then(|comment_with_metadata| {
+            debug!("Commenting back to PR#{}", pr_number);
+            match maybe_comment_to_override {
+                Some(comment_id) => config
+                    .api
+                    .edit_comment(
+                        &config.repo_owner,
+                        &config.repo_name,
+                        comment_id,
+                        &comment_with_metadata,
+                    )
+                    .context("Failed to edit comment")
+                    .map(|_| info!("Successfully commented back to PR#{}", pr_number)),
+                None => config
+                    .api
+                    .comment(
+                        &config.repo_owner,
+                        &config.repo_name,
+                        pr_number,
+                        &comment_with_metadata,
+                    )
+                    .map(|_| info!("Successfully commented back to PR#{}", pr_number)),
+            }
+        })
 }

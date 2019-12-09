@@ -22,7 +22,15 @@ impl HtmlCommentMetadataHandler {
     ) -> Result<String> {
         serde_json::to_string(&metadata)
             .context("Failed to serialize metadata")
-            .map(|metadata_json| format!("{}{}{}{}",comment, self.prefix(), metadata_json, self.suffix()))
+            .map(|metadata_json| {
+                format!(
+                    "{}{}{}{}",
+                    comment,
+                    self.prefix(),
+                    metadata_json,
+                    self.suffix()
+                )
+            })
     }
 
     pub fn get_metadata_from_comment<M: serde::de::DeserializeOwned>(
@@ -30,12 +38,12 @@ impl HtmlCommentMetadataHandler {
         comment: &str,
     ) -> Option<Result<M>> {
         let prefix = &self.prefix();
-        let position: Option<(usize, usize)> = comment.find(prefix).and_then(|start|{
+        let position: Option<(usize, usize)> = comment.find(prefix).and_then(|start| {
             let meta_start = start + prefix.len();
             let end = comment.find(&self.suffix());
             end.map(|e| (meta_start, e))
         });
-        if let Some((start,end)) = position {
+        if let Some((start, end)) = position {
             Some(serde_json::from_str(&comment[start..end]).context("Failed to parse metadata"))
         } else {
             None
@@ -56,8 +64,21 @@ mod tests {
         };
         let expected_full_com = "Some comment\n\n<!-- aaaa[1,2] -->";
 
-        assert_eq!(expected_full_com, &metadata_handler.add_metadata_to_comment(&comment, &metadata).unwrap());
-        assert_eq!(&metadata, &metadata_handler.get_metadata_from_comment::<Vec<u64>>(expected_full_com).unwrap().unwrap());
-        assert!(metadata_handler.get_metadata_from_comment::<()>(comment).is_none());
+        assert_eq!(
+            expected_full_com,
+            &metadata_handler
+                .add_metadata_to_comment(&comment, &metadata)
+                .unwrap()
+        );
+        assert_eq!(
+            &metadata,
+            &metadata_handler
+                .get_metadata_from_comment::<Vec<u64>>(expected_full_com)
+                .unwrap()
+                .unwrap()
+        );
+        assert!(metadata_handler
+            .get_metadata_from_comment::<()>(comment)
+            .is_none());
     }
 }
