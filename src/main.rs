@@ -9,6 +9,7 @@ use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg
 use env_logger;
 use github::{get_repo_info_from_url, GithubAPI, DEFAULT_GITHUB_API_URL};
 use log::{debug, info};
+use strum_macros::{EnumString, EnumVariantNames};
 use url::Url;
 
 #[derive(Debug)]
@@ -41,6 +42,23 @@ impl CommentSource {
     }
 }
 
+/// Define the behaviour when writing the comment on the PR
+#[derive(Debug, EnumString, EnumVariantNames)]
+enum CommentOverwriteMode {
+    /// Dont check for existing generated comment, just append
+    Never,
+    /// Always overwrite previous generated comment
+    Always,
+    /// Overwrite only if previous comment was made on same commit
+    OnSameCommit,
+}
+
+impl Default for CommentOverwriteMode {
+    fn default() -> CommentOverwriteMode {
+        CommentOverwriteMode::Always
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     api: GithubAPI,
@@ -48,6 +66,7 @@ pub struct Config {
     repo_name: String,
     branch_name: String,
     comment_source: CommentSource,
+    overwrite_mode: CommentOverwriteMode,
 }
 
 fn parse_cli() -> Result<Config> {
@@ -98,6 +117,10 @@ fn parse_cli() -> Result<Config> {
         .help("The content of the comment")
         .required_unless_one(&[comment_file_arg.b.name, std_in_arg.b.name])
         .takes_value(true);
+    let overwrite_mode_arg = Arg::with_name("PR Comment Overwrite Mode")
+        .long("overwrite")
+        .possible_values(&CommentOverwriteMode::variants())
+        .help("Whether previous comment in the PR should be overwritten");
     let app = App::new(crate_name!())
         .version(crate_version!())
         .about(crate_description!())
@@ -124,6 +147,7 @@ fn parse_cli() -> Result<Config> {
         .arg(&comment_arg)
         .arg(&comment_file_arg)
         .arg(&std_in_arg)
+        .arg(&overwrite_mode_arg)
         .get_matches();
 
     let repo_info = app.value_of(&repo_url_arg.b.name).map(|repo_url| {
@@ -218,6 +242,20 @@ fn parse_cli() -> Result<Config> {
         CommentSource::Standard(io::stdin())
     };
 
+    let overwrite_mode = app
+        .value_of(&overwrite_mode_arg.b.name)
+        .map(|m| {
+            CommentOverwriteMode::from_str(m).unwrap_or_else(|_| {
+                clap::Error {
+                    message: format!("Invalid overwrite Mode: {}", m,),
+                    kind: clap::ErrorKind::ArgumentNotFound,
+                    info: None,
+                }
+                .exit()
+            })
+        })
+        .unwrap_or_default();
+
     Ok(Config {
         api: GithubAPI {
             base_url: api_url,
@@ -227,6 +265,7 @@ fn parse_cli() -> Result<Config> {
         repo_name: repo,
         branch_name: get_arg(&app, &branch_arg),
         comment_source,
+        overwrite_mode,
     })
 }
 
